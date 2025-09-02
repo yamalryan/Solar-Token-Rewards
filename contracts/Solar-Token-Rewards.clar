@@ -7,8 +7,14 @@
 (define-constant err-not-registered (err u105))
 (define-constant err-invalid-energy (err u106))
 (define-constant err-cooldown-active (err u107))
+(define-constant err-achievement-exists (err u108))
+(define-constant err-milestone-not-reached (err u109))
 
 (define-fungible-token solar-token)
+(define-non-fungible-token achievement-nft {
+    achievement-type: uint,
+    producer: principal,
+})
 
 (define-map solar-producers
     principal
@@ -46,6 +52,55 @@
 (define-data-var verification-required bool true)
 (define-data-var claim-cooldown uint u144)
 (define-data-var max-daily-energy uint u10000)
+
+(define-map achievement-metadata
+    uint
+    {
+        name: (string-ascii 50),
+        description: (string-ascii 100),
+        energy-threshold: uint,
+        token-bonus: uint,
+    }
+)
+
+(define-map producer-achievements
+    {
+        producer: principal,
+        achievement-type: uint,
+    }
+    bool
+)
+
+(map-set achievement-metadata u1 {
+    name: "Solar Pioneer",
+    description: "First 1000 kWh produced",
+    energy-threshold: u1000,
+    token-bonus: u100,
+})
+(map-set achievement-metadata u2 {
+    name: "Energy Champion",
+    description: "Produced 5000+ kWh total",
+    energy-threshold: u5000,
+    token-bonus: u500,
+})
+(map-set achievement-metadata u3 {
+    name: "Solar Legend",
+    description: "Produced 10000+ kWh total",
+    energy-threshold: u10000,
+    token-bonus: u1000,
+})
+(map-set achievement-metadata u4 {
+    name: "Green Guardian",
+    description: "Produced 25000+ kWh total",
+    energy-threshold: u25000,
+    token-bonus: u2500,
+})
+(map-set achievement-metadata u5 {
+    name: "Renewable Master",
+    description: "Produced 50000+ kWh total",
+    energy-threshold: u50000,
+    token-bonus: u5000,
+})
 
 (define-public (register-producer (energy-rate uint))
     (let (
@@ -150,6 +205,7 @@
         (var-set total-rewards-distributed
             (+ (var-get total-rewards-distributed) reward-amount)
         )
+        (try! (check-achievements producer))
         (ok reward-amount)
     )
 )
@@ -317,5 +373,130 @@
     (match (map-get? solar-producers producer)
         data (get is-active data)
         false
+    )
+)
+
+(define-private (check-achievements (producer principal))
+    (let (
+            (producer-data (unwrap! (map-get? solar-producers producer) err-not-registered))
+            (total-energy (get total-energy-produced producer-data))
+        )
+        (try! (award-achievement-if-eligible producer u1 total-energy))
+        (try! (award-achievement-if-eligible producer u2 total-energy))
+        (try! (award-achievement-if-eligible producer u3 total-energy))
+        (try! (award-achievement-if-eligible producer u4 total-energy))
+        (try! (award-achievement-if-eligible producer u5 total-energy))
+        (ok true)
+    )
+)
+
+(define-private (award-achievement-if-eligible
+        (producer principal)
+        (achievement-type uint)
+        (total-energy uint)
+    )
+    (let (
+            (achievement-data (unwrap! (map-get? achievement-metadata achievement-type)
+                err-not-found
+            ))
+            (threshold (get energy-threshold achievement-data))
+            (bonus (get token-bonus achievement-data))
+            (achievement-key {
+                producer: producer,
+                achievement-type: achievement-type,
+            })
+        )
+        (if (and (>= total-energy threshold) (is-none (map-get? producer-achievements achievement-key)))
+            (begin
+                (map-set producer-achievements achievement-key true)
+                (try! (nft-mint? achievement-nft {
+                    achievement-type: achievement-type,
+                    producer: producer,
+                }
+                    producer
+                ))
+                (try! (ft-mint? solar-token bonus producer))
+                (ok true)
+            )
+            (ok false)
+        )
+    )
+)
+
+(define-public (claim-achievement (achievement-type uint))
+    (let (
+            (producer tx-sender)
+            (producer-data (unwrap! (map-get? solar-producers producer) err-not-registered))
+            (achievement-data (unwrap! (map-get? achievement-metadata achievement-type)
+                err-not-found
+            ))
+            (total-energy (get total-energy-produced producer-data))
+            (threshold (get energy-threshold achievement-data))
+            (bonus (get token-bonus achievement-data))
+            (achievement-key {
+                producer: producer,
+                achievement-type: achievement-type,
+            })
+        )
+        (asserts! (>= total-energy threshold) err-milestone-not-reached)
+        (asserts! (is-none (map-get? producer-achievements achievement-key))
+            err-achievement-exists
+        )
+        (map-set producer-achievements achievement-key true)
+        (try! (nft-mint? achievement-nft {
+            achievement-type: achievement-type,
+            producer: producer,
+        }
+            producer
+        ))
+        (try! (ft-mint? solar-token bonus producer))
+        (ok true)
+    )
+)
+
+(define-read-only (get-achievement-info (achievement-type uint))
+    (map-get? achievement-metadata achievement-type)
+)
+
+(define-read-only (has-achievement
+        (producer principal)
+        (achievement-type uint)
+    )
+    (is-some (map-get? producer-achievements {
+        producer: producer,
+        achievement-type: achievement-type,
+    }))
+)
+
+(define-read-only (get-producer-achievements (producer principal))
+    {
+        pioneer: (has-achievement producer u1),
+        champion: (has-achievement producer u2),
+        legend: (has-achievement producer u3),
+        guardian: (has-achievement producer u4),
+        master: (has-achievement producer u5),
+    }
+)
+
+(define-read-only (get-nft-owner
+        (achievement-type uint)
+        (producer principal)
+    )
+    (nft-get-owner? achievement-nft {
+        achievement-type: achievement-type,
+        producer: producer,
+    })
+)
+
+(define-public (transfer-achievement
+        (achievement-type uint)
+        (original-producer principal)
+        (recipient principal)
+    )
+    (nft-transfer? achievement-nft {
+        achievement-type: achievement-type,
+        producer: original-producer,
+    }
+        tx-sender recipient
     )
 )
