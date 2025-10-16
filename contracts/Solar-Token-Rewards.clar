@@ -9,10 +9,21 @@
 (define-constant err-cooldown-active (err u107))
 (define-constant err-achievement-exists (err u108))
 (define-constant err-milestone-not-reached (err u109))
+(define-constant err-carbon-credit-not-found (err u110))
+(define-constant err-insufficient-energy-for-credit (err u111))
+(define-constant err-carbon-credit-not-owned (err u112))
+(define-constant err-invalid-price (err u113))
+(define-constant err-listing-not-found (err u114))
 
 (define-fungible-token solar-token)
 (define-non-fungible-token achievement-nft {
     achievement-type: uint,
+    producer: principal,
+})
+
+(define-non-fungible-token carbon-credit {
+    credit-id: uint,
+    energy-amount: uint,
     producer: principal,
 })
 
@@ -52,6 +63,9 @@
 (define-data-var verification-required bool true)
 (define-data-var claim-cooldown uint u144)
 (define-data-var max-daily-energy uint u10000)
+(define-data-var carbon-credit-counter uint u0)
+(define-data-var energy-to-credit-rate uint u100)
+(define-data-var min-energy-for-credit uint u500)
 
 (define-map achievement-metadata
     uint
@@ -69,6 +83,27 @@
         achievement-type: uint,
     }
     bool
+)
+
+(define-map carbon-credits
+    uint
+    {
+        producer: principal,
+        energy-amount: uint,
+        created-at: uint,
+        is-verified: bool,
+        carbon-offset-tons: uint,
+    }
+)
+
+(define-map carbon-credit-marketplace
+    uint
+    {
+        seller: principal,
+        price: uint,
+        listed-at: uint,
+        is-active: bool,
+    }
 )
 
 (map-set achievement-metadata u1 {
@@ -498,5 +533,202 @@
         producer: original-producer,
     }
         tx-sender recipient
+    )
+)
+
+;; Carbon Credit Trading Functions
+
+(define-public (mint-carbon-credit (energy-amount uint))
+    (let (
+            (producer tx-sender)
+            (producer-data (unwrap! (map-get? solar-producers producer) err-not-registered))
+            (current-block stacks-block-height)
+            (credit-id (+ (var-get carbon-credit-counter) u1))
+            (carbon-tons (/ energy-amount (var-get energy-to-credit-rate)))
+        )
+        (asserts! (get is-active producer-data) err-not-registered)
+        (asserts! (>= energy-amount (var-get min-energy-for-credit))
+            err-insufficient-energy-for-credit
+        )
+        (asserts! (>= (get total-energy-produced producer-data) energy-amount)
+            err-insufficient-energy-for-credit
+        )
+        (var-set carbon-credit-counter credit-id)
+        (map-set carbon-credits credit-id {
+            producer: producer,
+            energy-amount: energy-amount,
+            created-at: current-block,
+            is-verified: true,
+            carbon-offset-tons: carbon-tons,
+        })
+        (try! (nft-mint? carbon-credit {
+            credit-id: credit-id,
+            energy-amount: energy-amount,
+            producer: producer,
+        }
+            producer
+        ))
+        (ok credit-id)
+    )
+)
+
+(define-public (transfer-carbon-credit
+        (credit-id uint)
+        (recipient principal)
+    )
+    (let (
+            (credit-data (unwrap! (map-get? carbon-credits credit-id)
+                err-carbon-credit-not-found
+            ))
+        )
+        (asserts! (is-eq tx-sender (get producer credit-data))
+            err-carbon-credit-not-owned
+        )
+        (try! (nft-transfer? carbon-credit {
+            credit-id: credit-id,
+            energy-amount: (get energy-amount credit-data),
+            producer: (get producer credit-data),
+        }
+            tx-sender recipient
+        ))
+        (map-set carbon-credits credit-id
+            (merge credit-data { producer: recipient })
+        )
+        (ok true)
+    )
+)
+
+(define-public (list-carbon-credit-for-sale
+        (credit-id uint)
+        (price uint)
+    )
+    (let (
+            (credit-data (unwrap! (map-get? carbon-credits credit-id)
+                err-carbon-credit-not-found
+            ))
+            (current-block stacks-block-height)
+        )
+        (asserts! (is-eq tx-sender (get producer credit-data))
+            err-carbon-credit-not-owned
+        )
+        (asserts! (> price u0) err-invalid-price)
+        (map-set carbon-credit-marketplace credit-id {
+            seller: tx-sender,
+            price: price,
+            listed-at: current-block,
+            is-active: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (purchase-carbon-credit (credit-id uint))
+    (let (
+            (listing (unwrap! (map-get? carbon-credit-marketplace credit-id)
+                err-listing-not-found
+            ))
+            (credit-data (unwrap! (map-get? carbon-credits credit-id)
+                err-carbon-credit-not-found
+            ))
+            (buyer tx-sender)
+            (seller (get seller listing))
+            (price (get price listing))
+        )
+        (asserts! (get is-active listing) err-listing-not-found)
+        (asserts! (>= (ft-get-balance solar-token buyer) price)
+            err-insufficient-balance
+        )
+        (try! (ft-transfer? solar-token price buyer seller))
+        (try! (nft-transfer? carbon-credit {
+            credit-id: credit-id,
+            energy-amount: (get energy-amount credit-data),
+            producer: (get producer credit-data),
+        }
+            seller buyer
+        ))
+        (map-set carbon-credits credit-id
+            (merge credit-data { producer: buyer })
+        )
+        (map-set carbon-credit-marketplace credit-id
+            (merge listing { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-public (cancel-carbon-credit-listing (credit-id uint))
+    (let (
+            (listing (unwrap! (map-get? carbon-credit-marketplace credit-id)
+                err-listing-not-found
+            ))
+        )
+        (asserts! (is-eq tx-sender (get seller listing))
+            err-carbon-credit-not-owned
+        )
+        (map-set carbon-credit-marketplace credit-id
+            (merge listing { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+;; Carbon Credit Read-Only Functions
+
+(define-read-only (get-carbon-credit-info (credit-id uint))
+    (map-get? carbon-credits credit-id)
+)
+
+(define-read-only (get-carbon-credit-listing (credit-id uint))
+    (map-get? carbon-credit-marketplace credit-id)
+)
+
+(define-read-only (get-carbon-credit-owner (credit-id uint))
+    (match (map-get? carbon-credits credit-id)
+        data (some (get producer data))
+        none
+    )
+)
+
+(define-read-only (get-carbon-credit-stats)
+    {
+        total-credits-minted: (var-get carbon-credit-counter),
+        energy-to-credit-rate: (var-get energy-to-credit-rate),
+        min-energy-for-credit: (var-get min-energy-for-credit),
+    }
+)
+
+(define-read-only (calculate-carbon-offset (energy-amount uint))
+    (/ energy-amount (var-get energy-to-credit-rate))
+)
+
+(define-read-only (get-nft-carbon-credit-owner
+        (credit-id uint)
+        (energy-amount uint)
+        (producer principal)
+    )
+    (nft-get-owner? carbon-credit {
+        credit-id: credit-id,
+        energy-amount: energy-amount,
+        producer: producer,
+    })
+)
+
+;; Owner-only functions for carbon credits
+
+(define-public (set-energy-to-credit-rate (new-rate uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> new-rate u0) err-invalid-amount)
+        (var-set energy-to-credit-rate new-rate)
+        (ok true)
+    )
+)
+
+(define-public (set-min-energy-for-credit (min-energy uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> min-energy u0) err-invalid-amount)
+        (var-set min-energy-for-credit min-energy)
+        (ok true)
     )
 )
