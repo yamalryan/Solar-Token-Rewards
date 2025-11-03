@@ -576,11 +576,7 @@
         (credit-id uint)
         (recipient principal)
     )
-    (let (
-            (credit-data (unwrap! (map-get? carbon-credits credit-id)
-                err-carbon-credit-not-found
-            ))
-        )
+    (let ((credit-data (unwrap! (map-get? carbon-credits credit-id) err-carbon-credit-not-found)))
         (asserts! (is-eq tx-sender (get producer credit-data))
             err-carbon-credit-not-owned
         )
@@ -646,9 +642,7 @@
         }
             seller buyer
         ))
-        (map-set carbon-credits credit-id
-            (merge credit-data { producer: buyer })
-        )
+        (map-set carbon-credits credit-id (merge credit-data { producer: buyer }))
         (map-set carbon-credit-marketplace credit-id
             (merge listing { is-active: false })
         )
@@ -657,11 +651,9 @@
 )
 
 (define-public (cancel-carbon-credit-listing (credit-id uint))
-    (let (
-            (listing (unwrap! (map-get? carbon-credit-marketplace credit-id)
-                err-listing-not-found
-            ))
-        )
+    (let ((listing (unwrap! (map-get? carbon-credit-marketplace credit-id)
+            err-listing-not-found
+        )))
         (asserts! (is-eq tx-sender (get seller listing))
             err-carbon-credit-not-owned
         )
@@ -729,6 +721,48 @@
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (asserts! (> min-energy u0) err-invalid-amount)
         (var-set min-energy-for-credit min-energy)
+        (ok true)
+    )
+)
+
+(define-map verifiers
+    principal
+    bool
+)
+
+(define-public (set-verifier
+        (verifier principal)
+        (allowed bool)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set verifiers verifier allowed)
+        (ok true)
+    )
+)
+
+(define-read-only (is-verifier (who principal))
+    (default-to false (map-get? verifiers who))
+)
+
+(define-public (verify-energy-submission-by-verifier
+        (producer principal)
+        (submission-id uint)
+    )
+    (let (
+            (submission-key {
+                producer: producer,
+                submission-id: submission-id,
+            })
+            (submission-data (unwrap! (map-get? energy-submissions submission-key) err-not-found))
+            (authorized (or (is-eq tx-sender contract-owner) (default-to false (map-get? verifiers tx-sender))))
+        )
+        (asserts! authorized err-owner-only)
+        (asserts! (not (get verified submission-data)) err-already-exists)
+        (map-set energy-submissions submission-key
+            (merge submission-data { verified: true })
+        )
+        (try! (process-reward producer submission-id))
         (ok true)
     )
 )
